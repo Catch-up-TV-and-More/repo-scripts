@@ -1,14 +1,18 @@
+from __future__ import annotations
 import json
 import re
 import xbmc
+import xbmcaddon
 import xbmcgui
 import xbmcvfs
 import xml.etree.ElementTree as ElementTree
 from urllib.parse import unquote
 from typing import Any
 
-# noinspection PyPackages
-from .constants import ADDON
+
+# (TODO - once OzWeather 2.1.6 and all the other addons updates are released, the * here can just be ADDON again, sigh)
+# noinspection PyPackages,PyUnusedImports
+from .constants import *
 # noinspection PyPackages
 from .logger import Logger
 
@@ -214,6 +218,131 @@ def is_playback_paused() -> bool:
     return bool(xbmc.getCondVisibility("Player.Paused"))
 
 
+def get_addon_version(addon_id: str) -> str | None:
+    """
+    Helper function to return the currently installed version of Kodi addon by its ID.
+
+    :param addon_id: the ID of the addon, e.g. weather.ozweather
+    :return: the version string (e.g. "0.0.1"), or None if the addon is not installed and enabled
+    """
+    try:
+        addon = xbmcaddon.Addon(id=addon_id)
+        version = addon.getAddonInfo('version')
+    except RuntimeError as e:
+        Logger.error(f"Error getting version for {addon_id}")
+        Logger.error(e)
+        return None
+
+    return version
+
+
+def version_tuple(version_str: str) -> tuple:
+    """
+    Helper function to return a version tuple from a version string "2.1.5" -> (2, 1 , 5)
+    Useful for comparisons, e.g. if version_tuple(version) <= version_tuple('2.1.5')
+
+    :param version_str: the addon version string
+    :return: version in tuple form (1, 2, 3)
+    """
+    return tuple(map(int, version_str.split('.')))
+
+
+def get_resume_point(library_type: str, dbid: int) -> float | None:
+    """
+    Get the resume point from the Kodi library for a given Kodi DB item
+
+    :param library_type: one of 'episode', 'movie' or 'musicvideo'
+    :param dbid: the Kodi DB item ID
+    :return: the resume point, or None if there isn't one set
+    """
+
+    params = _get_jsonrpc_video_lib_params(library_type)
+    # Short circuit if there is an issue get the JSON RPC method etc.
+    if not params:
+        return None
+    get_method, id_name, result_key = params
+
+    json_dict = {
+            "jsonrpc":"2.0",
+            "id":"getResumePoint",
+            "method":get_method,
+            "params":{
+                    id_name:dbid,
+                    "properties":["resume"],
+            }
+    }
+
+    query = json.dumps(json_dict)
+    json_response = send_kodi_json(f'Get resume point for {library_type} with dbid: {dbid}', query)
+    if not json_response:
+        Logger.error("Nothing returned from JSON-RPC query")
+        return None
+
+    result = json_response.get('result')
+    if result:
+        try:
+            resume_point = result[result_key]['resume']['position']
+        except (KeyError, TypeError) as e:
+            Logger.error("Could not get resume point")
+            Logger.error(e)
+            resume_point = None
+    else:
+        Logger.error("No result returned from JSON-RPC query")
+        resume_point = None
+
+    Logger.info(f"Resume point retrieved: {resume_point}")
+
+    return resume_point
+
+
+def get_playcount(library_type: str, dbid: int) -> int | None:
+    """
+    Get the playcount for the given Kodi DB item
+
+    :param library_type: one of 'episode', 'movie' or 'musicvideo'
+    :param dbid: the Kodi DB item ID
+    :return: the playcount if there is one, or None
+    """
+
+    params = _get_jsonrpc_video_lib_params(library_type)
+    # Short circuit if there is an issue get the JSON RPC method etc.
+    if not params:
+        return None
+    get_method, id_name, result_key = params
+
+    json_dict = {
+            "jsonrpc":"2.0",
+            "id":"getPlayCount",
+            "method":get_method,
+            "params":{
+                    id_name:dbid,
+                    "properties":["playcount"],
+            }
+    }
+
+    query = json.dumps(json_dict)
+    json_response = send_kodi_json(f'Get playcount for {library_type} with dbid: {dbid}', query)
+    if not json_response:
+        Logger.error("Nothing returned from JSON-RPC query")
+        return None
+
+    result = json_response.get('result')
+    if result:
+        try:
+            play_count = result[result_key]['playcount']
+        except (KeyError, TypeError) as e:
+            Logger.error("Could not get playcount")
+            Logger.error(e)
+            play_count = None
+    else:
+        Logger.error("No result returned from JSON-RPC query")
+        play_count = None
+
+    Logger.info(f"Playcount retrieved: {play_count}")
+
+    return play_count
+
+
 def footprints(startup: bool = True) -> None:
     """
     TODO - this has moved to Logger - update all addons to use Logger.start/.stop directly, then ultimately remove this!
@@ -225,3 +354,30 @@ def footprints(startup: bool = True) -> None:
         Logger.start()
     else:
         Logger.stop()
+
+
+def _get_jsonrpc_video_lib_params(library_type: str) -> tuple[str, str, str] | None:
+    """
+    Given a Kodi library type, return the JSON RPC library parameters needed to get details
+
+    :param library_type: one of 'episode', 'movie' or 'musicvideo'
+    :return:  method for getting details, the name of the id, and the key for the results returned
+    """
+
+    if library_type == 'episode':
+        get_method = 'VideoLibrary.GetEpisodeDetails'
+        id_name = 'episodeid'
+        result_key = 'episodedetails'
+    elif library_type == 'movie':
+        get_method = 'VideoLibrary.GetMovieDetails'
+        id_name = 'movieid'
+        result_key = 'moviedetails'
+    elif library_type == 'musicvideo':
+        get_method = 'VideoLibrary.GetMusicVideoDetails'
+        id_name = 'musicvideoid'
+        result_key = 'musicvideodetails'
+    else:
+        Logger.error(f"Unsupported library type: {library_type}")
+        return None
+
+    return get_method, id_name, result_key
